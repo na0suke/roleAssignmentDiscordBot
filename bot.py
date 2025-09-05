@@ -40,7 +40,7 @@ ROLE_MESSAGES = {
     },
     'adc': {
         'emoji': '🏹',
-        'title': 'ADCキャリー',
+        'title': 'ADC',
         'message': 'あなたがダメージ出せないならチームは負けます！責任重大です！',
         'tips': 'ダメージ！ダメージ！'
     },
@@ -212,7 +212,7 @@ async def assign_roles(interaction, message, available_roles):
     if assignments:
         embed = discord.Embed(
             title="🎊 ロール割り当て完了！",
-            description="参加者の皆さん、`/secret_role` コマンドで自分のロールを確認してください！",
+            description="参加者の皆さんに個別でロール結果を送信しました！",
             color=0x0099ff
         )
         
@@ -230,13 +230,13 @@ async def assign_roles(interaction, message, available_roles):
     else:
         await interaction.followup.send("ロールを割り当てできませんでした。")
 
-@bot.tree.command(name='secret_role', description='秘密のロール決めを開始します（参加者のみに表示）')
+@bot.tree.command(name='secret_role', description='秘密のロール決めを開始します（即座に結果表示）')
 @discord.app_commands.describe(
     excluded_roles='除外するロール（スペース区切り）例: top mid'
 )
 async def secret_role_assignment(interaction: discord.Interaction, excluded_roles: str = None):
     """
-    秘密のロール決めを開始するスラッシュコマンド
+    秘密のロール決めを開始するスラッシュコマンド（即座に決定）
     """
     # 除外ロールの処理
     excluded = set()
@@ -258,25 +258,29 @@ async def secret_role_assignment(interaction: discord.Interaction, excluded_role
         await interaction.response.send_message("全てのロールが除外されています！", ephemeral=True)
         return
     
+    # ロールをランダムにシャッフル
+    shuffled_roles = available_roles.copy()
+    random.shuffle(shuffled_roles)
+    
     excluded_text = f" (除外: {', '.join(excluded)})" if excluded else ""
     embed = discord.Embed(
         title="🔒 秘密のロール決め開始！",
-        description=f"参加したい人は1〜5の数字でリアクションしてください！{excluded_text}",
+        description=f"数字を選ぶと即座にロールが決定されます！{excluded_text}",
         color=0x9932cc
     )
-    embed.add_field(name="利用可能なロール", value=f"{', '.join([ROLES[role] for role in available_roles])}", inline=False)
     
     # 利用可能なロール数に応じてリアクション数を決定
     max_participants = len(available_roles)
     number_emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣']
     display_numbers = number_emojis[:max_participants]
     
-    participation_text = f"{' '.join(display_numbers)} のいずれかでリアクション"
+    # 数字とロールの対応を表示（ロール名は隠す）
+    participation_text = f"{' '.join(display_numbers)} から選択してください"
     embed.add_field(name="参加方法", value=participation_text, inline=False)
-    embed.add_field(name="抽選開始", value="🎲 をクリックして抽選スタート！", inline=False)
-    embed.add_field(name="参加可能人数", value=f"最大 {max_participants} 人", inline=False)
-    embed.add_field(name="⚠️ 注意", value="結果は参加者にのみ個別通知されます", inline=False)
-    embed.set_footer(text="参加者が揃ったら🎲で抽選開始（5分でタイムアウト）")
+    embed.add_field(name="利用可能なロール", value=f"{', '.join([ROLES[role] for role in available_roles])}", inline=False)
+    embed.add_field(name="⚠️ 重要", value="数字を選ぶと即座にロールが確定します！", inline=False)
+    embed.add_field(name="🔒 プライバシー", value="結果はあなたにのみ表示されます", inline=False)
+    embed.set_footer(text="一度選択すると変更できません")
     
     await interaction.response.send_message(embed=embed)
     message = await interaction.original_response()
@@ -285,130 +289,87 @@ async def secret_role_assignment(interaction: discord.Interaction, excluded_role
     for num in display_numbers:
         await message.add_reaction(num)
     
-    # 抽選開始用の絵文字を追加
-    await message.add_reaction('🎲')
+    # 数字とロールの対応を保存
+    role_mapping = {}
+    for i, role in enumerate(shuffled_roles):
+        if i < len(display_numbers):
+            role_mapping[display_numbers[i]] = role
+    
+    # 選択済みロールを管理
+    selected_roles = set()
     
     # リアクション監視を開始
-    await monitor_secret_lottery_reaction(interaction, message, available_roles)
+    await monitor_instant_role_selection(interaction, message, role_mapping, selected_roles)
 
-async def monitor_secret_lottery_reaction(interaction, message, available_roles):
+async def monitor_instant_role_selection(interaction, message, role_mapping, selected_roles):
     """
-    秘密抽選開始リアクションを監視する
+    数字リアクションを監視して即座にロール決定
     """
-    def check(reaction, user):
+    def check_number_reaction(reaction, user):
         return (reaction.message.id == message.id and 
-                str(reaction.emoji) == '🎲' and 
+                str(reaction.emoji) in role_mapping.keys() and 
                 not user.bot)
     
     try:
-        # 抽選開始リアクションを待機
-        reaction, user = await bot.wait_for('reaction_add', timeout=300.0, check=check)  # 5分でタイムアウト
-        
-        # 抽選開始メッセージ
-        lottery_embed = discord.Embed(
-            title="🔒 秘密抽選中...",
-            description="ロールを決めています...",
-            color=0xffff00
-        )
-        await interaction.followup.send(embed=lottery_embed)
-        
-        # 少し待機（演出）
-        await asyncio.sleep(2)
-        
-        # メッセージを再取得してリアクションを確認
-        try:
-            message = await interaction.channel.fetch_message(message.id)
-            await assign_secret_roles(interaction, message, available_roles)
-        except discord.NotFound:
-            await interaction.followup.send("メッセージが見つかりません。")
+        while len(selected_roles) < len(role_mapping):
+            reaction, user = await bot.wait_for('reaction_add', timeout=300.0, check=check_number_reaction)
             
+            selected_emoji = str(reaction.emoji)
+            assigned_role = role_mapping[selected_emoji]
+            
+            # 重複チェック
+            if assigned_role in selected_roles:
+                # すでに選択済みのロールの場合
+                duplicate_embed = discord.Embed(
+                    title="⚠️ 既に選択済み",
+                    description=f"数字 {selected_emoji} のロールは既に他の人が選択しています。\n別の数字を選んでください。",
+                    color=0xff9900
+                )
+                await interaction.followup.send(f"{user.mention}", embed=duplicate_embed, ephemeral=True)
+                continue
+            
+            # ロールを確定
+            selected_roles.add(assigned_role)
+            
+            # ユーザーに結果を通知
+            role_data = ROLE_MESSAGES[assigned_role]
+            role_name = ROLES[assigned_role]
+            number_index = list(role_mapping.keys()).index(selected_emoji) + 1
+            
+            result_embed = discord.Embed(
+                title=f"🔒 {role_data['emoji']} あなたの秘密ロール: {role_data['title']}",
+                description=role_data['message'],
+                color=0x9932cc
+            )
+            result_embed.add_field(name="🎯 選んだ数字", value=f"{selected_emoji} (番号: {number_index})", inline=True)
+            result_embed.add_field(name="🎮 確定ロール", value=role_name, inline=True)
+            result_embed.add_field(name="💡 アドバイス", value=role_data['tips'], inline=False)
+            result_embed.add_field(name="🔒 機密情報", value="このロールは他の参加者には秘密です", inline=False)
+            result_embed.set_footer(text="ロールが確定しました！")
+            
+            await interaction.followup.send(f"{user.mention}", embed=result_embed, ephemeral=True)
+            
+            # チャンネルには進行状況のみ表示（ロールは隠す）
+            progress_embed = discord.Embed(
+                title="🔒 秘密ロール選択中...",
+                description=f"参加者: {len(selected_roles)}/{len(role_mapping)} 人",
+                color=0x9932cc
+            )
+            if len(selected_roles) == len(role_mapping):
+                progress_embed.add_field(name="✅ 完了", value="全てのロールが決定しました！", inline=False)
+            else:
+                remaining_numbers = [emoji for emoji, role in role_mapping.items() if role not in selected_roles]
+                progress_embed.add_field(name="🎯 残り選択肢", value=' '.join(remaining_numbers), inline=False)
+            
+            await interaction.followup.send(embed=progress_embed)
+                
     except asyncio.TimeoutError:
         timeout_embed = discord.Embed(
             title="⏰ タイムアウト",
-            description="5分間反応がなかったため、秘密ゲームを終了しました。",
+            description="5分間反応がなかったため、秘密ロール決めを終了しました。",
             color=0xff0000
         )
         await interaction.followup.send(embed=timeout_embed)
-
-async def assign_secret_roles(interaction, message, available_roles):
-    """
-    秘密ロール割り当て処理
-    """
-    participants = {}
-    
-    # リアクションから参加者を収集
-    number_map = {'1️⃣': 1, '2️⃣': 2, '3️⃣': 3, '4️⃣': 4, '5️⃣': 5}
-    
-    for reaction in message.reactions:
-        if reaction.emoji in number_map:
-            async for user in reaction.users():
-                if not user.bot:  # Botを除外
-                    user_number = number_map[reaction.emoji]
-                    if user.id not in participants:  # 重複参加防止
-                        participants[user.id] = {
-                            'user': user,
-                            'number': user_number
-                        }
-    
-    if len(participants) == 0:
-        await interaction.followup.send("参加者がいません！")
-        return
-    
-    # ロール割り当て
-    assignments = {}
-    
-    # 参加者をシャッフル
-    participant_list = list(participants.values())
-    random.shuffle(participant_list)
-    
-    # ロールを割り当て
-    for i, participant in enumerate(participant_list):
-        if i < len(available_roles):
-            role = available_roles[i]
-            assignments[participant['user']] = {
-                'role': role,
-                'number': participant['number']
-            }
-    
-    # 結果をチャンネルに表示（参加者数のみ）
-    if assignments:
-        embed = discord.Embed(
-            title="🔒 秘密ロール割り当て完了！",
-            description=f"参加者 {len(assignments)} 人に個別でロール結果を送信しました。",
-            color=0x9932cc
-        )
-        embed.add_field(name="🔒 プライバシー", value="各参加者にのみロール結果が通知されています", inline=False)
-        
-        await interaction.followup.send(embed=embed)
-        
-        # 各参加者にephemeralでロール結果を送信
-        for user, data in assignments.items():
-            try:
-                role_data = ROLE_MESSAGES[data['role']]
-                role_name = ROLES[data['role']]
-                
-                secret_embed = discord.Embed(
-                    title=f"🔒 {role_data['emoji']} あなたの秘密ロール: {role_data['title']}",
-                    description=role_data['message'],
-                    color=0x9932cc
-                )
-                secret_embed.add_field(name="🎯 選んだ数字", value=data['number'], inline=True)
-                secret_embed.add_field(name="🎮 ロール", value=role_name, inline=True)
-                secret_embed.add_field(name="💡 アドバイス", value=role_data['tips'], inline=False)
-                secret_embed.add_field(name="🔒 機密情報", value="このロールは他の参加者には秘密です", inline=False)
-                
-                # ephemeralメッセージで個別通知
-                await interaction.followup.send(f"{user.mention}", embed=secret_embed, ephemeral=True)
-                
-                # 少し待機（Discordのレート制限対策）
-                await asyncio.sleep(0.5)
-                
-            except Exception as e:
-                # エラーが発生した場合はログに記録
-                print(f"ユーザー {user.name} への通知エラー: {e}")
-                await interaction.followup.send(f"⚠️ {user.mention} への通知に失敗しました。", ephemeral=True)
-    else:
-        await interaction.followup.send("ロールを割り当てできませんでした。")
 
 # 旧式のプレフィックスコマンドの案内
 @bot.command(name='role')

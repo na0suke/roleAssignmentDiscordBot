@@ -263,11 +263,40 @@ async def secret_role_assignment(interaction: discord.Interaction, excluded_role
     random.shuffle(shuffled_roles)
     
     excluded_text = f" (除外: {', '.join(excluded)})" if excluded else ""
+    
+    # コマンド実行者のVC参加者を取得
+    command_user = interaction.user
+    vc_members = []
+    vc_channel_name = None
+    
+    if command_user.voice and command_user.voice.channel:
+        vc_channel = command_user.voice.channel
+        vc_members = [member for member in vc_channel.members if not member.bot]
+        vc_channel_name = vc_channel.name
+        
+        if len(vc_members) < len(available_roles):
+            await interaction.response.send_message(
+                f"⚠️ VC参加者が不足しています。必要: {len(available_roles)}人、現在: {len(vc_members)}人", 
+                ephemeral=True
+            )
+            return
+    else:
+        await interaction.response.send_message(
+            "⚠️ ボイスチャンネルに参加してからコマンドを実行してください。", 
+            ephemeral=True
+        )
+        return
+    
     embed = discord.Embed(
         title="🔒 秘密のロール決め開始！",
         description=f"数字を選ぶと即座にロールが決定されます！{excluded_text}",
         color=0x9932cc
     )
+    
+    # VC情報を表示
+    vc_member_list = ", ".join([member.display_name for member in vc_members])
+    embed.add_field(name="🎤 対象VC", value=f"**{vc_channel_name}**", inline=False)
+    embed.add_field(name="👥 参加者", value=vc_member_list, inline=False)
     
     # 利用可能なロール数に応じてリアクション数を決定
     max_participants = len(available_roles)
@@ -299,7 +328,91 @@ async def secret_role_assignment(interaction: discord.Interaction, excluded_role
     selected_roles = set()
     
     # リアクション監視を開始
-    await monitor_instant_role_selection(interaction, message, role_mapping, selected_roles)
+    await monitor_temp_channel_role_selection(interaction, message, role_mapping, selected_roles, temp_channel)
+
+async def monitor_temp_channel_role_selection(interaction, message, role_mapping, selected_roles, temp_channel):
+    """
+    一時チャンネルでの数字リアクションを監視して即座にロール決定
+    """
+    def check_number_reaction(reaction, user):
+        return (reaction.message.id == message.id and 
+                str(reaction.emoji) in role_mapping.keys() and 
+                not user.bot)
+    
+    try:
+        while len(selected_roles) < len(role_mapping):
+            reaction, user = await bot.wait_for('reaction_add', timeout=300.0, check=check_number_reaction)
+            
+            selected_emoji = str(reaction.emoji)
+            assigned_role = role_mapping[selected_emoji]
+            
+            # 重複チェック
+            if assigned_role in selected_roles:
+                # すでに選択済みのロールの場合
+                duplicate_embed = discord.Embed(
+                    title="⚠️ 既に選択済み",
+                    description=f"数字 {selected_emoji} のロールは既に他の人が選択しています。\n別の数字を選んでください。",
+                    color=0xff9900
+                )
+                await temp_channel.send(f"{user.mention}", embed=duplicate_embed, delete_after=10)
+                continue
+            
+            # ロールを確定
+            selected_roles.add(assigned_role)
+            
+            # ユーザーに結果を通知（ephemeral風に、一時的メッセージで）
+            role_data = ROLE_MESSAGES[assigned_role]
+            role_name = ROLES[assigned_role]
+            number_index = list(role_mapping.keys()).index(selected_emoji) + 1
+            
+            result_embed = discord.Embed(
+                title=f"🔒 {role_data['emoji']} あなたの秘密ロール: {role_data['title']}",
+                description=role_data['message'],
+                color=0x9932cc
+            )
+            result_embed.add_field(name="🎯 選んだ数字", value=f"{selected_emoji} (番号: {number_index})", inline=True)
+            result_embed.add_field(name="🎮 確定ロール", value=role_name, inline=True)
+            result_embed.add_field(name="💡 アドバイス", value=role_data['tips'], inline=False)
+            result_embed.add_field(name="🔒 機密情報", value="このロールは他の参加者には秘密です", inline=False)
+            result_embed.set_footer(text="ロールが確定しました！")
+            
+            # 一時的メッセージとして送信（10秒後に削除）
+            await temp_channel.send(f"{user.mention}", embed=result_embed, delete_after=10)
+            
+            # 進行状況を表示
+            progress_embed = discord.Embed(
+                title="🔒 秘密ロール選択中...",
+                description=f"参加者: {len(selected_roles)}/{len(role_mapping)} 人がロール決定",
+                color=0x9932cc
+            )
+            if len(selected_roles) == len(role_mapping):
+                progress_embed.add_field(name="✅ 完了", value="全てのロールが決定しました！\n10秒後にこのチャンネルを削除します", inline=False)
+                await temp_channel.send(embed=progress_embed)
+                
+                # 10秒待ってからチャンネル削除
+                await asyncio.sleep(10)
+                try:
+                    await temp_channel.delete()
+                except:
+                    print(f"チャンネル削除失敗: {temp_channel.name}")
+                break
+            else:
+                remaining_numbers = [emoji for emoji, role in role_mapping.items() if role not in selected_roles]
+                progress_embed.add_field(name="🎯 残り選択肢", value=' '.join(remaining_numbers), inline=False)
+                await temp_channel.send(embed=progress_embed, delete_after=5)
+                
+    except asyncio.TimeoutError:
+        timeout_embed = discord.Embed(
+            title="⏰ タイムアウト",
+            description="5分間反応がなかったため、秘密ロール決めを終了しました。\n30秒後にこのチャンネルを削除します。",
+            color=0xff0000
+        )
+        await temp_channel.send(embed=timeout_embed)
+        await asyncio.sleep(30)
+        try:
+            await temp_channel.delete()
+        except:
+            print(f"チャンネル削除失敗: {temp_channel.name}")
 
 async def monitor_instant_role_selection(interaction, message, role_mapping, selected_roles):
     """

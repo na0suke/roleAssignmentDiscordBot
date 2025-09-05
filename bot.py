@@ -212,16 +212,17 @@ async def assign_roles(interaction, message, available_roles):
     if assignments:
         embed = discord.Embed(
             title="🎊 ロール割り当て完了！",
-            description="参加者の皆さんに個別でロール結果を送信しました！",
+            description="チャンネルでロール結果を確認してください！",
             color=0x0099ff
         )
         
-        participant_text = ""
+        result_text = ""
         for user, data in assignments.items():
-            participant_text += f"{user.mention} (数字: {data['number']})\n"
+            role_name = ROLES[data['role']]
+            role_emoji = ROLE_MESSAGES[data['role']]['emoji']
+            result_text += f"{user.mention} (数字: {data['number']}) → **{role_emoji} {role_name}**\n"
         
-        embed.add_field(name="🎯 参加者", value=participant_text, inline=False)
-        embed.add_field(name="🔍 ロール確認", value="`/secret_role` コマンドを実行すると、あなただけにロールが表示されます", inline=False)
+        embed.add_field(name="🎯 ロール割り当て結果", value=result_text, inline=False)
         
         # 参加者に通知するためのメンションを作成
         mentions = " ".join([user.mention for user in assignments.keys()])
@@ -230,13 +231,13 @@ async def assign_roles(interaction, message, available_roles):
     else:
         await interaction.followup.send("ロールを割り当てできませんでした。")
 
-@bot.tree.command(name='secret_role', description='秘密のロール決めを開始します（即座に結果表示）')
+@bot.tree.command(name='secret_role', description='秘密のロール決めを開始します（VC参加者限定）')
 @discord.app_commands.describe(
     excluded_roles='除外するロール（スペース区切り）例: top mid'
 )
 async def secret_role_assignment(interaction: discord.Interaction, excluded_roles: str = None):
     """
-    秘密のロール決めを開始するスラッシュコマンド（即座に決定）
+    秘密のロール決めを開始するスラッシュコマンド（VC参加者限定）
     """
     # 除外ロールの処理
     excluded = set()
@@ -287,14 +288,55 @@ async def secret_role_assignment(interaction: discord.Interaction, excluded_role
         )
         return
     
+    # 一時的チャンネルを作成
+    guild = interaction.guild
+    category = interaction.channel.category  # 現在のチャンネルと同じカテゴリに作成
+    
+    # チャンネル権限を設定（VC参加者のみアクセス可能）
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),  # @everyone は見えない
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)  # Bot権限のみ
+    }
+    
+    # VC参加者にのみ権限を付与
+    for member in vc_members:
+        overwrites[member] = discord.PermissionOverwrite(read_messages=True, send_messages=True, add_reactions=True)
+    
+    # 管理者権限を持つ人も明示的に除外（VC参加者でない場合）
+    vc_member_ids = {member.id for member in vc_members}
+    for member in guild.members:
+        if member.guild_permissions.administrator and member.id not in vc_member_ids and not member.bot:
+            overwrites[member] = discord.PermissionOverwrite(read_messages=False)  # 管理者でもVC非参加なら見えない
+    
+    # 一時チャンネル作成
+    temp_channel_name = f"🔒role-決め-{vc_channel_name.lower()}"
+    temp_channel = await guild.create_text_channel(
+        name=temp_channel_name,
+        category=category,
+        overwrites=overwrites,
+        topic=f"🎤 {vc_channel_name} 参加者限定のロール決め"
+    )
+    
+    # 元のチャンネルで案内メッセージ
+    vc_member_list = ", ".join([member.display_name for member in vc_members])
+    guide_embed = discord.Embed(
+        title="🎤 VC限定ロール決め開始",
+        description=f"**{vc_channel_name}** 参加者専用チャンネルを作成しました！",
+        color=0x9932cc
+    )
+    guide_embed.add_field(name="📍 専用チャンネル", value=f"{temp_channel.mention}", inline=False)
+    guide_embed.add_field(name="👥 対象者", value=vc_member_list, inline=False)
+    guide_embed.add_field(name="⚠️ 注意", value="ロール決め完了後、チャンネルは自動削除されます", inline=False)
+    
+    await interaction.response.send_message(embed=guide_embed)
+    
+    # 専用チャンネルでロール決めメッセージを送信
     embed = discord.Embed(
         title="🔒 秘密のロール決め開始！",
         description=f"数字を選ぶと即座にロールが決定されます！{excluded_text}",
         color=0x9932cc
     )
     
-    # VC情報を表示
-    vc_member_list = ", ".join([member.display_name for member in vc_members])
     embed.add_field(name="🎤 対象VC", value=f"**{vc_channel_name}**", inline=False)
     embed.add_field(name="👥 参加者", value=vc_member_list, inline=False)
     
@@ -308,11 +350,10 @@ async def secret_role_assignment(interaction: discord.Interaction, excluded_role
     embed.add_field(name="参加方法", value=participation_text, inline=False)
     embed.add_field(name="利用可能なロール", value=f"{', '.join([ROLES[role] for role in available_roles])}", inline=False)
     embed.add_field(name="⚠️ 重要", value="数字を選ぶと即座にロールが確定します！", inline=False)
-    embed.add_field(name="🔒 プライバシー", value="結果はあなたにのみ表示されます", inline=False)
+    embed.add_field(name="🔒 プライバシー", value="結果はチャンネル内で表示されます", inline=False)
     embed.set_footer(text="一度選択すると変更できません")
     
-    await interaction.response.send_message(embed=embed)
-    message = await interaction.original_response()
+    message = await temp_channel.send(embed=embed)
     
     # 利用可能なロール数分だけ数字の絵文字を追加
     for num in display_numbers:
@@ -351,33 +392,30 @@ async def monitor_temp_channel_role_selection(interaction, message, role_mapping
                 # すでに選択済みのロールの場合
                 duplicate_embed = discord.Embed(
                     title="⚠️ 既に選択済み",
-                    description=f"数字 {selected_emoji} のロールは既に他の人が選択しています。\n別の数字を選んでください。",
+                    description=f"数字 {selected_emoji} のロールは既に他の人が選択しています。\n{user.mention} は別の数字を選んでください。",
                     color=0xff9900
                 )
-                await temp_channel.send(f"{user.mention}", embed=duplicate_embed, delete_after=10)
+                await temp_channel.send(embed=duplicate_embed)
                 continue
             
             # ロールを確定
             selected_roles.add(assigned_role)
             
-            # ユーザーに結果を通知（ephemeral風に、一時的メッセージで）
+            # ユーザーに結果を通知（普通のメッセージ）
             role_data = ROLE_MESSAGES[assigned_role]
             role_name = ROLES[assigned_role]
             number_index = list(role_mapping.keys()).index(selected_emoji) + 1
             
             result_embed = discord.Embed(
-                title=f"🔒 {role_data['emoji']} あなたの秘密ロール: {role_data['title']}",
+                title=f"{role_data['emoji']} {user.display_name} のロール: {role_data['title']}",
                 description=role_data['message'],
                 color=0x9932cc
             )
             result_embed.add_field(name="🎯 選んだ数字", value=f"{selected_emoji} (番号: {number_index})", inline=True)
             result_embed.add_field(name="🎮 確定ロール", value=role_name, inline=True)
             result_embed.add_field(name="💡 アドバイス", value=role_data['tips'], inline=False)
-            result_embed.add_field(name="🔒 機密情報", value="このロールは他の参加者には秘密です", inline=False)
-            result_embed.set_footer(text="ロールが確定しました！")
             
-            # 一時的メッセージとして送信（10秒後に削除）
-            await temp_channel.send(f"{user.mention}", embed=result_embed, delete_after=10)
+            await temp_channel.send(embed=result_embed)
             
             # 進行状況を表示
             progress_embed = discord.Embed(
@@ -386,11 +424,11 @@ async def monitor_temp_channel_role_selection(interaction, message, role_mapping
                 color=0x9932cc
             )
             if len(selected_roles) == len(role_mapping):
-                progress_embed.add_field(name="✅ 完了", value="全てのロールが決定しました！\n10秒後にこのチャンネルを削除します", inline=False)
+                progress_embed.add_field(name="✅ 完了", value="全てのロールが決定しました！\n30秒後にこのチャンネルを削除します", inline=False)
                 await temp_channel.send(embed=progress_embed)
                 
-                # 10秒待ってからチャンネル削除
-                await asyncio.sleep(10)
+                # 30秒待ってからチャンネル削除
+                await asyncio.sleep(30)
                 try:
                     await temp_channel.delete()
                 except:
@@ -399,7 +437,7 @@ async def monitor_temp_channel_role_selection(interaction, message, role_mapping
             else:
                 remaining_numbers = [emoji for emoji, role in role_mapping.items() if role not in selected_roles]
                 progress_embed.add_field(name="🎯 残り選択肢", value=' '.join(remaining_numbers), inline=False)
-                await temp_channel.send(embed=progress_embed, delete_after=5)
+                await temp_channel.send(embed=progress_embed)
                 
     except asyncio.TimeoutError:
         timeout_embed = discord.Embed(
@@ -413,76 +451,6 @@ async def monitor_temp_channel_role_selection(interaction, message, role_mapping
             await temp_channel.delete()
         except:
             print(f"チャンネル削除失敗: {temp_channel.name}")
-
-async def monitor_instant_role_selection(interaction, message, role_mapping, selected_roles):
-    """
-    数字リアクションを監視して即座にロール決定
-    """
-    def check_number_reaction(reaction, user):
-        return (reaction.message.id == message.id and 
-                str(reaction.emoji) in role_mapping.keys() and 
-                not user.bot)
-    
-    try:
-        while len(selected_roles) < len(role_mapping):
-            reaction, user = await bot.wait_for('reaction_add', timeout=300.0, check=check_number_reaction)
-            
-            selected_emoji = str(reaction.emoji)
-            assigned_role = role_mapping[selected_emoji]
-            
-            # 重複チェック
-            if assigned_role in selected_roles:
-                # すでに選択済みのロールの場合
-                duplicate_embed = discord.Embed(
-                    title="⚠️ 既に選択済み",
-                    description=f"数字 {selected_emoji} のロールは既に他の人が選択しています。\n別の数字を選んでください。",
-                    color=0xff9900
-                )
-                await interaction.followup.send(f"{user.mention}", embed=duplicate_embed, ephemeral=True)
-                continue
-            
-            # ロールを確定
-            selected_roles.add(assigned_role)
-            
-            # ユーザーに結果を通知
-            role_data = ROLE_MESSAGES[assigned_role]
-            role_name = ROLES[assigned_role]
-            number_index = list(role_mapping.keys()).index(selected_emoji) + 1
-            
-            result_embed = discord.Embed(
-                title=f"🔒 {role_data['emoji']} あなたの秘密ロール: {role_data['title']}",
-                description=role_data['message'],
-                color=0x9932cc
-            )
-            result_embed.add_field(name="🎯 選んだ数字", value=f"{selected_emoji} (番号: {number_index})", inline=True)
-            result_embed.add_field(name="🎮 確定ロール", value=role_name, inline=True)
-            result_embed.add_field(name="💡 アドバイス", value=role_data['tips'], inline=False)
-            result_embed.add_field(name="🔒 機密情報", value="このロールは他の参加者には秘密です", inline=False)
-            result_embed.set_footer(text="ロールが確定しました！")
-            
-            await interaction.followup.send(f"{user.mention}", embed=result_embed, ephemeral=True)
-            
-            # チャンネルには進行状況のみ表示（ロールは隠す）
-            progress_embed = discord.Embed(
-                title="🔒 秘密ロール選択中...",
-                description=f"参加者: {len(selected_roles)}/{len(role_mapping)} 人",
-                color=0x9932cc
-            )
-            if len(selected_roles) == len(role_mapping):
-                progress_embed.add_field(name="✅ 完了", value="全てのロールが決定しました！", inline=False)
-            else:
-                remaining_numbers = [emoji for emoji, role in role_mapping.items() if role not in selected_roles]
-                progress_embed.add_field(name="🎯 残り選択肢", value=' '.join(remaining_numbers), inline=False)
-            
-            await interaction.followup.send(embed=progress_embed)
-                
-    except asyncio.TimeoutError:
-        timeout_embed = discord.Embed(
-            title="⏰ タイムアウト",
-            description="5分間反応がなかったため、秘密ロール決めを終了しました。",
-            color=0xff0000
-        )
-        await interaction.followup.send(embed=timeout_embed)
 
 # 旧式のプレフィックスコマンドの案内
 @bot.command(name='role')

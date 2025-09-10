@@ -619,9 +619,9 @@ async def monitor_exclusion_and_lottery(interaction, message, vc_members, sessio
             color=0xff0000
         )
         await interaction.followup.send(embed=timeout_embed)
-        # セッションデータをクリア
-        if session_id in user_role_exclusions:
-            del user_role_exclusions[session_id]
+        # セッションデータをクリア（ただし実行後はクリアしない）
+        # if session_id in user_role_exclusions:
+        #     del user_role_exclusions[session_id]
 
 async def handle_non_participation_reaction(interaction, reaction, user, session_id):
     """

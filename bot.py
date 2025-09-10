@@ -553,9 +553,9 @@ async def monitor_exclusion_and_lottery(interaction, message, vc_members, sessio
         while True:
             # 除外リアクションまたは実行開始リアクションを待機
             done, pending = await asyncio.wait([
-                bot.wait_for('reaction_add', check=check_exclusion_reaction),
-                bot.wait_for('reaction_remove', check=check_exclusion_reaction),
-                bot.wait_for('reaction_add', check=check_execute_reaction)
+                asyncio.create_task(bot.wait_for('reaction_add', check=check_exclusion_reaction)),
+                asyncio.create_task(bot.wait_for('reaction_remove', check=check_exclusion_reaction)),
+                asyncio.create_task(bot.wait_for('reaction_add', check=check_execute_reaction))
             ], return_when=asyncio.FIRST_COMPLETED, timeout=300.0)
             
             # 未完了のタスクをキャンセル

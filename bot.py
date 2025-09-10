@@ -485,20 +485,6 @@ async def exclude_role_assignment(interaction: discord.Interaction):
                 ephemeral=True
             )
             return
-        elif len(vc_members) > 5:
-            member_list = ", ".join([member.display_name for member in vc_members])
-            await interaction.response.send_message(
-                f"⚠️ **VC参加者が多すぎます**\n" +
-                f"現在: **{len(vc_members)}人** / 最大: **5人**\n\n" +
-                f"**参加者一覧**: {member_list}\n\n" +
-                f"💡 **解決方法**:\n" +
-                f"• **5人まで減らす**: 一部のメンバーが一時退出\n" +
-                f"• **別のVC作成**: チームを分ける\n" +
-                f"• **通常の `/role` 使用**: リアクション参加型\n" +
-                f"• **2回に分けて実行**: 5人ずつでロール決め",
-                ephemeral=True
-            )
-            return
     else:
         await interaction.response.send_message(
             "⚠️ ボイスチャンネルに参加してからコマンドを実行してください。", 
@@ -520,9 +506,10 @@ async def exclude_role_assignment(interaction: discord.Interaction):
         color=0xff6b6b
     )
     embed.add_field(name="🎤 対象VC", value=f"**{vc_channel_name}**", inline=False)
-    embed.add_field(name="👥 参加者", value=vc_member_list, inline=False)
-    embed.add_field(name="📋 手順", value="1️⃣ やりたくないロールを選択\n2️⃣ 選択完了後 ▶️ でロール分け実行", inline=False)
-    embed.add_field(name="⚠️ 注意", value="• 複数のロールを除外可能\n• どれも選択しなければ全ロール候補", inline=False)
+    embed.add_field(name="👥 VC参加者", value=vc_member_list, inline=False)
+    embed.add_field(name="📋 手順", value="1️⃣ 参加しない人は ❌ をクリック\n2️⃣ やりたくないロールを選択\n3️⃣ 選択完了後 ▶️ でロール分け実行", inline=False)
+    embed.add_field(name="🚫 不参加", value="❌ → 今回のロール決めに参加しない（観戦）", inline=False)
+    embed.add_field(name="⚠️ 注意", value="• 複数のロールを除外可能\n• どれも選択しなければ全ロール候補\n• 参加者は2-5人まで", inline=False)
     
     # ロール選択肢を表示
     role_list = ""
@@ -541,6 +528,9 @@ async def exclude_role_assignment(interaction: discord.Interaction):
     for letter in ROLE_LETTERS.keys():
         await message.add_reaction(letter)
     
+    # 不参加リアクションを常に追加
+    await message.add_reaction('❌')
+    
     # 実行開始用の絵文字を追加
     await message.add_reaction('▶️')
     
@@ -552,11 +542,17 @@ async def monitor_exclusion_and_lottery(interaction, message, vc_members, sessio
     除外リアクションと実行開始を監視
     """
     vc_member_ids = {member.id for member in vc_members}
+    executed = False  # 実行フラグ
     
     def check_exclusion_reaction(reaction, user):
         return (reaction.message.id == message.id and 
                 user.id in vc_member_ids and 
                 str(reaction.emoji) in ROLE_LETTERS.keys())
+    
+    def check_non_participation_reaction(reaction, user):
+        return (reaction.message.id == message.id and 
+                user.id in vc_member_ids and 
+                str(reaction.emoji) == '❌')
     
     def check_execute_reaction(reaction, user):
         return (reaction.message.id == message.id and 
@@ -565,12 +561,16 @@ async def monitor_exclusion_and_lottery(interaction, message, vc_members, sessio
     
     try:
         while True:
-            # 除外リアクションまたは実行開始リアクションを待機
-            done, pending = await asyncio.wait([
+            # 除外リアクション、不参加リアクション、または実行開始リアクションを待機
+            tasks = [
                 asyncio.create_task(bot.wait_for('reaction_add', check=check_exclusion_reaction)),
                 asyncio.create_task(bot.wait_for('reaction_remove', check=check_exclusion_reaction)),
-                asyncio.create_task(bot.wait_for('reaction_add', check=check_execute_reaction))
-            ], return_when=asyncio.FIRST_COMPLETED, timeout=300.0)
+                asyncio.create_task(bot.wait_for('reaction_add', check=check_execute_reaction)),
+                asyncio.create_task(bot.wait_for('reaction_add', check=check_non_participation_reaction)),
+                asyncio.create_task(bot.wait_for('reaction_remove', check=check_non_participation_reaction))
+            ]
+            
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED, timeout=300.0)
             
             # 未完了のタスクをキャンセル
             for task in pending:
@@ -583,13 +583,34 @@ async def monitor_exclusion_and_lottery(interaction, message, vc_members, sessio
             
             # 実行開始の場合
             if str(reaction.emoji) == '▶️':
-                # 抽選を実行
-                await execute_exclusion_lottery(interaction, message, vc_members, session_id)
-                break
+                if not executed:
+                    executed = True
+                    # リアクションを削除して再実行を防止
+                    try:
+                        await message.clear_reactions()
+                        await message.add_reaction('🔒')  # 実行済みマーク
+                    except:
+                        pass
+                    
+                    # 抽選を実行
+                    await execute_exclusion_lottery(interaction, message, vc_members, session_id)
+                    break
+                else:
+                    # 既に実行済みの場合
+                    await interaction.followup.send(
+                        f"⚠️ {user.mention} ロール分けは既に実行済みです。", 
+                        ephemeral=True
+                    )
+            
+            # 不参加リアクションの場合
+            elif str(reaction.emoji) == '❌':
+                if not executed:
+                    await handle_non_participation_reaction(interaction, reaction, user, session_id)
             
             # 除外ロール選択の場合
             else:
-                await handle_exclusion_reaction(interaction, reaction, user, session_id)
+                if not executed:
+                    await handle_exclusion_reaction(interaction, reaction, user, session_id)
                 
     except asyncio.TimeoutError:
         timeout_embed = discord.Embed(
@@ -601,6 +622,32 @@ async def monitor_exclusion_and_lottery(interaction, message, vc_members, sessio
         # セッションデータをクリア
         if session_id in user_role_exclusions:
             del user_role_exclusions[session_id]
+
+async def handle_non_participation_reaction(interaction, reaction, user, session_id):
+    """
+    不参加リアクションの処理
+    """
+    # ユーザーの設定を初期化
+    if user.id not in user_role_exclusions[session_id]:
+        user_role_exclusions[session_id][user.id] = {'user': user, 'excluded_roles': set(), 'participating': True}
+    
+    # メッセージを再取得してリアクション状態を確認
+    try:
+        message = await interaction.channel.fetch_message(reaction.message.id)
+        user_has_non_participation = False
+        
+        for msg_reaction in message.reactions:
+            if str(msg_reaction.emoji) == '❌':
+                async for reaction_user in msg_reaction.users():
+                    if reaction_user.id == user.id:
+                        user_has_non_participation = True
+                        break
+        
+        # リアクションがある場合は不参加、ない場合は参加
+        user_role_exclusions[session_id][user.id]['participating'] = not user_has_non_participation
+        
+    except discord.NotFound:
+        pass
 
 async def handle_exclusion_reaction(interaction, reaction, user, session_id):
     """
@@ -615,7 +662,7 @@ async def handle_exclusion_reaction(interaction, reaction, user, session_id):
     
     # ユーザーの除外リストを初期化
     if user.id not in user_role_exclusions[session_id]:
-        user_role_exclusions[session_id][user.id] = {'user': user, 'excluded_roles': set()}
+        user_role_exclusions[session_id][user.id] = {'user': user, 'excluded_roles': set(), 'participating': True}
     
     # メッセージを再取得してリアクション状態を確認
     try:

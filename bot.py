@@ -457,11 +457,11 @@ user_role_exclusions = {}
 
 # ロール文字のマッピング
 ROLE_LETTERS = {
-    'T': 'top',
-    'J': 'jg', 
-    'M': 'mid',
-    'A': 'adc',
-    'S': 'sup'
+    '⚔️': 'top',
+    '🌲': 'jg', 
+    '🪄': 'mid',
+    '🏹': 'adc',
+    '❤️': 'sup'
 }
 
 @bot.tree.command(name='exclude_role', description='VC参加者限定：やりたくないロールを選んでからロール分けします')

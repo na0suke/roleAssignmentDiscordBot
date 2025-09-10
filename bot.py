@@ -452,6 +452,323 @@ async def monitor_temp_channel_role_selection(interaction, message, role_mapping
         except:
             print(f"チャンネル削除失敗: {temp_channel.name}")
 
+# ロール除外データを保存する辞書
+user_role_exclusions = {}
+
+# ロール文字のマッピング
+ROLE_LETTERS = {
+    'T': 'top',
+    'J': 'jg', 
+    'M': 'mid',
+    'A': 'adc',
+    'S': 'sup'
+}
+
+@bot.tree.command(name='exclude_role', description='VC参加者限定：やりたくないロールを選んでからロール分けします')
+async def exclude_role_assignment(interaction: discord.Interaction):
+    """
+    VC参加者限定でやりたくないロールを除外してロール分けを行う
+    """
+    # コマンド実行者のVC参加者を取得
+    command_user = interaction.user
+    vc_members = []
+    vc_channel_name = None
+    
+    if command_user.voice and command_user.voice.channel:
+        vc_channel = command_user.voice.channel
+        vc_members = [member for member in vc_channel.members if not member.bot]
+        vc_channel_name = vc_channel.name
+        
+        if len(vc_members) < 2:
+            await interaction.response.send_message(
+                "⚠️ VC参加者が2人以上必要です。", 
+                ephemeral=True
+            )
+            return
+    else:
+        await interaction.response.send_message(
+            "⚠️ ボイスチャンネルに参加してからコマンドを実行してください。", 
+            ephemeral=True
+        )
+        return
+    
+    # 除外設定をリセット
+    session_id = f"{interaction.channel_id}_{vc_channel.id}"
+    user_role_exclusions[session_id] = {}
+    
+    # VC参加者リスト
+    vc_member_list = ", ".join([member.display_name for member in vc_members])
+    
+    # 除外ロール選択のメッセージ
+    embed = discord.Embed(
+        title="🚫 やりたくないロール選択",
+        description=f"**{vc_channel_name}** 参加者限定\n\nやりたくないロールをリアクションで選択してください！",
+        color=0xff6b6b
+    )
+    embed.add_field(name="🎤 対象VC", value=f"**{vc_channel_name}**", inline=False)
+    embed.add_field(name="👥 参加者", value=vc_member_list, inline=False)
+    embed.add_field(name="📋 手順", value="1️⃣ やりたくないロールを選択\n2️⃣ 選択完了後 ▶️ でロール分け実行", inline=False)
+    embed.add_field(name="⚠️ 注意", value="• 複数のロールを除外可能\n• どれも選択しなければ全ロール候補", inline=False)
+    
+    # ロール選択肢を表示
+    role_list = ""
+    for letter, role_key in ROLE_LETTERS.items():
+        role_name = ROLES[role_key]
+        role_list += f"{letter} → {role_name}\n"
+    
+    embed.add_field(name="🎯 除外可能なロール", value=role_list, inline=False)
+    embed.add_field(name="💡 ヒント", value="リアクションなし = どのロールでもOK", inline=False)
+    embed.set_footer(text="除外選択完了後、▶️ で実行開始！")
+    
+    await interaction.response.send_message(embed=embed)
+    message = await interaction.original_response()
+    
+    # ロール除外用の文字リアクションを追加
+    for letter in ROLE_LETTERS.keys():
+        await message.add_reaction(letter)
+    
+    # 実行開始用の絵文字を追加
+    await message.add_reaction('▶️')
+    
+    # リアクション監視を開始
+    await monitor_exclusion_and_lottery(interaction, message, vc_members, session_id)
+
+async def monitor_exclusion_and_lottery(interaction, message, vc_members, session_id):
+    """
+    除外リアクションと実行開始を監視
+    """
+    vc_member_ids = {member.id for member in vc_members}
+    
+    def check_exclusion_reaction(reaction, user):
+        return (reaction.message.id == message.id and 
+                user.id in vc_member_ids and 
+                str(reaction.emoji) in ROLE_LETTERS.keys())
+    
+    def check_execute_reaction(reaction, user):
+        return (reaction.message.id == message.id and 
+                str(reaction.emoji) == '▶️' and 
+                user.id in vc_member_ids)
+    
+    try:
+        while True:
+            # 除外リアクションまたは実行開始リアクションを待機
+            done, pending = await asyncio.wait([
+                bot.wait_for('reaction_add', check=check_exclusion_reaction),
+                bot.wait_for('reaction_remove', check=check_exclusion_reaction),
+                bot.wait_for('reaction_add', check=check_execute_reaction)
+            ], return_when=asyncio.FIRST_COMPLETED, timeout=300.0)
+            
+            # 未完了のタスクをキャンセル
+            for task in pending:
+                task.cancel()
+            
+            if not done:
+                continue
+                
+            reaction, user = await done.pop()
+            
+            # 実行開始の場合
+            if str(reaction.emoji) == '▶️':
+                # 抽選を実行
+                await execute_exclusion_lottery(interaction, message, vc_members, session_id)
+                break
+            
+            # 除外ロール選択の場合
+            else:
+                await handle_exclusion_reaction(interaction, reaction, user, session_id)
+                
+    except asyncio.TimeoutError:
+        timeout_embed = discord.Embed(
+            title="⏰ タイムアウト",
+            description="5分間反応がなかったため、除外ロール選択を終了しました。",
+            color=0xff0000
+        )
+        await interaction.followup.send(embed=timeout_embed)
+        # セッションデータをクリア
+        if session_id in user_role_exclusions:
+            del user_role_exclusions[session_id]
+
+async def handle_exclusion_reaction(interaction, reaction, user, session_id):
+    """
+    除外ロールのリアクション処理
+    """
+    letter = str(reaction.emoji)
+    
+    # 文字からロールキーを取得
+    role_key = ROLE_LETTERS.get(letter)
+    if not role_key:
+        return
+    
+    # ユーザーの除外リストを初期化
+    if user.id not in user_role_exclusions[session_id]:
+        user_role_exclusions[session_id][user.id] = {'user': user, 'excluded_roles': set()}
+    
+    # メッセージを再取得してリアクション状態を確認
+    try:
+        message = await interaction.channel.fetch_message(reaction.message.id)
+        user_reactions = []
+        
+        for msg_reaction in message.reactions:
+            if str(msg_reaction.emoji) == letter:
+                async for reaction_user in msg_reaction.users():
+                    if reaction_user.id == user.id:
+                        user_reactions.append(letter)
+                        break
+        
+        # リアクションがある場合は除外リストに追加、ない場合は削除
+        if letter in user_reactions:
+            user_role_exclusions[session_id][user.id]['excluded_roles'].add(role_key)
+        else:
+            user_role_exclusions[session_id][user.id]['excluded_roles'].discard(role_key)
+            
+    except discord.NotFound:
+        pass
+
+async def execute_exclusion_lottery(interaction, message, vc_members, session_id):
+    """
+    除外設定を考慮したロール抽選を実行
+    """
+    # 実行開始メッセージ
+    lottery_embed = discord.Embed(
+        title="🎰 除外設定を確認中...",
+        description="各プレイヤーの除外ロールを確認しています...",
+        color=0xffff00
+    )
+    await interaction.followup.send(embed=lottery_embed)
+    
+    await asyncio.sleep(2)
+    
+    # 除外設定の確認と表示
+    exclusion_summary = "**🚫 除外設定一覧**\n"
+    valid_assignments = []
+    
+    for member in vc_members:
+        excluded_roles = set()
+        if member.id in user_role_exclusions[session_id]:
+            excluded_roles = user_role_exclusions[session_id][member.id]['excluded_roles']
+        
+        # 除外されていないロール = 利用可能なロール
+        available_roles = [role for role in ROLES.keys() if role not in excluded_roles]
+        
+        if excluded_roles:
+            excluded_names = [ROLES[role] for role in excluded_roles]
+            exclusion_summary += f"• {member.display_name}: 除外 {', '.join(excluded_names)}\n"
+        else:
+            exclusion_summary += f"• {member.display_name}: 除外なし（全ロールOK）\n"
+        
+        valid_assignments.append({
+            'user': member,
+            'available_roles': available_roles,
+            'excluded_count': len(excluded_roles)
+        })
+    
+    # 割り当て可能性をチェック
+    all_roles = list(ROLES.keys())
+    if len(vc_members) > len(all_roles):
+        error_embed = discord.Embed(
+            title="❌ エラー",
+            description=f"参加者数（{len(vc_members)}人）がロール数（{len(all_roles)}個）を超えています。",
+            color=0xff0000
+        )
+        await interaction.followup.send(embed=error_embed)
+        return
+    
+    # 割り当てアルゴリズム実行
+    try:
+        assignments = assign_roles_with_exclusions(valid_assignments, all_roles)
+        
+        if not assignments:
+            error_embed = discord.Embed(
+                title="❌ 割り当て失敗",
+                description="除外設定により、全員にロールを割り当てることができませんでした。\n除外するロールを減らしてください。",
+                color=0xff0000
+            )
+            error_embed.add_field(name="除外状況", value=exclusion_summary, inline=False)
+            await interaction.followup.send(embed=error_embed)
+            return
+        
+        # 結果表示
+        result_embed = discord.Embed(
+            title="🎊 除外設定を考慮したロール割り当て完了！",
+            description="各プレイヤーの希望を考慮してロールを決定しました！",
+            color=0x00ff88
+        )
+        
+        result_text = ""
+        for user, role_key in assignments.items():
+            role_name = ROLES[role_key]
+            role_emoji = ROLE_MESSAGES[role_key]['emoji']
+            result_text += f"{user.mention} → **{role_emoji} {role_name}**\n"
+        
+        result_embed.add_field(name="🎯 ロール割り当て結果", value=result_text, inline=False)
+        result_embed.add_field(name="📊 除外設定", value=exclusion_summary, inline=False)
+        
+        # 参加者に通知
+        mentions = " ".join([user.mention for user in assignments.keys()])
+        await interaction.followup.send(f"🎉 {mentions}", embed=result_embed)
+        
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="❌ システムエラー",
+            description="ロール割り当て中にエラーが発生しました。",
+            color=0xff0000
+        )
+        await interaction.followup.send(embed=error_embed)
+        print(f"Role assignment error: {e}")
+    
+    finally:
+        # セッションデータをクリア
+        if session_id in user_role_exclusions:
+            del user_role_exclusions[session_id]
+
+def assign_roles_with_exclusions(valid_assignments, all_roles):
+    """
+    除外設定を考慮したロール割り当てアルゴリズム
+    """
+    import random
+    
+    # 参加者数分のロールをランダムに選択
+    available_roles = random.sample(all_roles, len(valid_assignments))
+    
+    # 制約が厳しい（利用可能ロールが少ない）プレイヤーから順に割り当て
+    sorted_assignments = sorted(valid_assignments, key=lambda x: len(x['available_roles']))
+    
+    # 複数回試行して最適解を見つける
+    for attempt in range(100):
+        assignments = {}
+        used_roles = set()
+        success = True
+        
+        # シャッフルして毎回異なる結果を得る
+        current_available_roles = available_roles.copy()
+        random.shuffle(current_available_roles)
+        assignment_order = sorted_assignments.copy()
+        random.shuffle(assignment_order)
+        
+        for player_data in assignment_order:
+            user = player_data['user']
+            available_for_user = [role for role in player_data['available_roles'] 
+                                 if role in current_available_roles and role not in used_roles]
+            
+            if not available_for_user:
+                success = False
+                break
+            
+            # ランダムに選択
+            chosen_role = random.choice(available_for_user)
+            assignments[user] = chosen_role
+            used_roles.add(chosen_role)
+        
+        if success and len(assignments) == len(valid_assignments):
+            return assignments
+        
+        # 失敗した場合は、利用可能ロールを再選択して再試行
+        if attempt % 10 == 9:  # 10回ごとに利用可能ロールを変更
+            available_roles = random.sample(all_roles, len(valid_assignments))
+    
+    # 100回試行しても解が見つからない場合
+    return None
+
 # 旧式のプレフィックスコマンドの案内
 @bot.command(name='role')
 async def old_role_command(ctx):

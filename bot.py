@@ -485,6 +485,20 @@ async def exclude_role_assignment(interaction: discord.Interaction):
                 ephemeral=True
             )
             return
+        elif len(vc_members) > 5:
+            member_list = ", ".join([member.display_name for member in vc_members])
+            await interaction.response.send_message(
+                f"⚠️ **VC参加者が多すぎます**\n" +
+                f"現在: **{len(vc_members)}人** / 最大: **5人**\n\n" +
+                f"**参加者一覧**: {member_list}\n\n" +
+                f"💡 **解決方法**:\n" +
+                f"• **5人まで減らす**: 一部のメンバーが一時退出\n" +
+                f"• **別のVC作成**: チームを分ける\n" +
+                f"• **通常の `/role` 使用**: リアクション参加型\n" +
+                f"• **2回に分けて実行**: 5人ずつでロール決め",
+                ephemeral=True
+            )
+            return
     else:
         await interaction.response.send_message(
             "⚠️ ボイスチャンネルに参加してからコマンドを実行してください。", 
@@ -631,18 +645,54 @@ async def execute_exclusion_lottery(interaction, message, vc_members, session_id
     # 実行開始メッセージ
     lottery_embed = discord.Embed(
         title="🎰 除外設定を確認中...",
-        description="各プレイヤーの除外ロールを確認しています...",
+        description="各プレイヤーの除外ロールと参加状況を確認しています...",
         color=0xffff00
     )
     await interaction.followup.send(embed=lottery_embed)
     
     await asyncio.sleep(2)
     
+    # 参加者のみをフィルタリング
+    participating_members = []
+    non_participating_members = []
+    
+    for member in vc_members:
+        is_participating = True
+        if member.id in user_role_exclusions[session_id]:
+            is_participating = user_role_exclusions[session_id][member.id].get('participating', True)
+        
+        if is_participating:
+            participating_members.append(member)
+        else:
+            non_participating_members.append(member)
+    
+    # 参加者が少なすぎる場合
+    if len(participating_members) < 2:
+        error_embed = discord.Embed(
+            title="❌ 参加者不足",
+            description=f"ロール決めには最低2人の参加者が必要です。\n現在の参加者: {len(participating_members)}人",
+            color=0xff0000
+        )
+        await interaction.followup.send(embed=error_embed)
+        return
+    
+    # 参加者が多すぎる場合
+    if len(participating_members) > 5:
+        error_embed = discord.Embed(
+            title="❌ 参加者過多",
+            description=f"ロール決めの参加者が多すぎます。\n参加者: {len(participating_members)}人 / 最大: 5人\n\n追加で ❌ を押して不参加にしてください。",
+            color=0xff0000
+        )
+        participating_list = ", ".join([member.display_name for member in participating_members])
+        error_embed.add_field(name="現在の参加者", value=participating_list, inline=False)
+        await interaction.followup.send(embed=error_embed)
+        return
+    
     # 除外設定の確認と表示
     exclusion_summary = "**🚫 除外設定一覧**\n"
     valid_assignments = []
     
-    for member in vc_members:
+    for member in participating_members:
         excluded_roles = set()
         if member.id in user_role_exclusions[session_id]:
             excluded_roles = user_role_exclusions[session_id][member.id]['excluded_roles']
@@ -662,16 +712,15 @@ async def execute_exclusion_lottery(interaction, message, vc_members, session_id
             'excluded_count': len(excluded_roles)
         })
     
+    # 不参加者の情報も表示
+    if non_participating_members:
+        non_participating_list = ", ".join([member.display_name for member in non_participating_members])
+        exclusion_summary += f"\n**👥 参加状況**\n"
+        exclusion_summary += f"• 参加者: {len(participating_members)}人\n"
+        exclusion_summary += f"• 不参加: {non_participating_list}\n"
+    
     # 割り当て可能性をチェック
     all_roles = list(ROLES.keys())
-    if len(vc_members) > len(all_roles):
-        error_embed = discord.Embed(
-            title="❌ エラー",
-            description=f"参加者数（{len(vc_members)}人）がロール数（{len(all_roles)}個）を超えています。",
-            color=0xff0000
-        )
-        await interaction.followup.send(embed=error_embed)
-        return
     
     # 割り当てアルゴリズム実行
     try:
@@ -701,7 +750,7 @@ async def execute_exclusion_lottery(interaction, message, vc_members, session_id
             result_text += f"{user.mention} → **{role_emoji} {role_name}**\n"
         
         result_embed.add_field(name="🎯 ロール割り当て結果", value=result_text, inline=False)
-        result_embed.add_field(name="📊 除外設定", value=exclusion_summary, inline=False)
+        result_embed.add_field(name="📊 詳細情報", value=exclusion_summary, inline=False)
         
         # 参加者に通知
         mentions = " ".join([user.mention for user in assignments.keys()])
